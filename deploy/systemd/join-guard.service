@@ -1,0 +1,23 @@
+[Unit]
+Description=Telegram Join Guard Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=joinguard
+Group=joinguard
+WorkingDirectory=/opt/join-guard-bot
+EnvironmentFile=/opt/join-guard-bot/.env
+ExecStart=/opt/join-guard-bot/.venv/bin/python /opt/join-guard-bot/main.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/join-guard-bot
+ReadWritePaths=/var/lib/join-guard
+
+[Install]
+WantedBy=multi-user.target
