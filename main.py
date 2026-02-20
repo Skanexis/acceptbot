@@ -254,17 +254,20 @@ def estimate_account_age_days(user_id: int) -> int:
 
 def is_suspicious_account(user: User, min_account_age_days: int) -> tuple[bool, str, int]:
     if user.is_bot:
-        return True, "заявка подана ботом", 0
+        return True, "richiesta inviata da un bot", 0
 
     estimated_age_days = estimate_account_age_days(user.id)
     if estimated_age_days < min_account_age_days:
         return (
             True,
-            f"оценочный возраст аккаунта {estimated_age_days} дн., меньше порога {min_account_age_days} дн.",
+            (
+                f"eta stimata dell'account: {estimated_age_days} giorni, "
+                f"inferiore alla soglia di {min_account_age_days} giorni."
+            ),
             estimated_age_days,
         )
 
-    return False, f"оценочный возраст аккаунта {estimated_age_days} дн.", estimated_age_days
+    return False, f"eta stimata dell'account: {estimated_age_days} giorni.", estimated_age_days
 
 
 def generate_captcha() -> tuple[str, int, list[int]]:
@@ -303,8 +306,8 @@ def build_admin_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Одобрить", callback_data=f"adm:approve:{request_id}"),
-                InlineKeyboardButton(text="Отклонить", callback_data=f"adm:decline:{request_id}"),
+                InlineKeyboardButton(text="Approva", callback_data=f"adm:approve:{request_id}"),
+                InlineKeyboardButton(text="Rifiuta", callback_data=f"adm:decline:{request_id}"),
             ]
         ]
     )
@@ -359,8 +362,8 @@ class JoinGuardBot:
 
     async def on_start(self, message: Message) -> None:
         await message.answer(
-            "Бот модерации заявок работает.\n"
-            "Если вы подали заявку в канал, следуйте инструкциям, которые придут в этот чат."
+            "Il bot di moderazione delle richieste e attivo.\n"
+            "Se hai inviato una richiesta al canale, segui le istruzioni che arriveranno in questa chat."
         )
 
     async def on_join_request(self, join_request: ChatJoinRequest) -> None:
@@ -372,7 +375,7 @@ class JoinGuardBot:
 
         await self.safe_send_user_message(
             join_request.user_chat_id,
-            "Ваша заявка получена. Сейчас бот проверит аккаунт и сообщит следующий шаг.",
+            "La tua richiesta e stata ricevuta. Ora il bot controllera l'account e ti inviera il prossimo passaggio.",
         )
 
         suspicious, reason, estimated_age_days = is_suspicious_account(user, self.settings.min_account_age_days)
@@ -381,7 +384,7 @@ class JoinGuardBot:
             await self.notify_admins(join_request, request_id, reason, estimated_age_days)
             await self.safe_send_user_message(
                 join_request.user_chat_id,
-                "Заявка отправлена администратору на ручную проверку. О результате сообщу в этот чат.",
+                "La richiesta e stata inviata a un amministratore per la verifica manuale. Ti aggiornero in questa chat.",
             )
             return
 
@@ -389,32 +392,32 @@ class JoinGuardBot:
         self.storage.mark_pending_captcha(request_id, question, answer)
         await self.safe_send_user_message(
             join_request.user_chat_id,
-            f"Проверка аккаунта пройдена.\nРешите капчу для входа в канал:\n{question}",
+            f"Controllo account completato.\nRisolvi il captcha per entrare nel canale:\n{question}",
             reply_markup=build_captcha_keyboard(request_id, options),
         )
 
     async def on_captcha_callback(self, callback: CallbackQuery) -> None:
         if not callback.data:
-            await callback.answer("Некорректная капча.", show_alert=True)
+            await callback.answer("Captcha non valido.", show_alert=True)
             return
 
         parsed = parse_captcha_callback(callback.data)
         if parsed is None:
-            await callback.answer("Некорректная капча.", show_alert=True)
+            await callback.answer("Captcha non valido.", show_alert=True)
             return
 
         request_id, selected_answer = parsed
         request = self.storage.get(request_id)
         if request is None:
-            await callback.answer("Заявка не найдена.", show_alert=True)
+            await callback.answer("Richiesta non trovata.", show_alert=True)
             return
 
         if int(request["user_id"]) != callback.from_user.id:
-            await callback.answer("Это не ваша капча.", show_alert=True)
+            await callback.answer("Questo captcha non e tuo.", show_alert=True)
             return
 
         if request["status"] != "pending_captcha":
-            await callback.answer("Заявка уже обработана.", show_alert=True)
+            await callback.answer("La richiesta e gia stata elaborata.", show_alert=True)
             return
 
         expected_answer = int(request["captcha_answer"])
@@ -423,10 +426,10 @@ class JoinGuardBot:
             if approved:
                 self.storage.complete(request_id, "approved", None, "captcha_passed")
                 if callback.message:
-                    await callback.message.edit_text("Капча пройдена. Заявка одобрена, доступ в канал открыт.")
-                await callback.answer("Заявка одобрена.")
+                    await callback.message.edit_text("Captcha superato. Richiesta approvata, accesso al canale aperto.")
+                await callback.answer("Richiesta approvata.")
             else:
-                await callback.answer("Не удалось одобрить заявку, попробуйте позже.", show_alert=True)
+                await callback.answer("Impossibile approvare la richiesta, riprova piu tardi.", show_alert=True)
             return
 
         attempts = self.storage.increment_captcha_attempts(request_id)
@@ -436,77 +439,77 @@ class JoinGuardBot:
                 self.storage.complete(request_id, "declined", None, "captcha_failed")
             if callback.message:
                 await callback.message.edit_text(
-                    "Лимит попыток исчерпан. Заявка отклонена. Подайте новую заявку в канал."
+                    "Limite tentativi raggiunto. Richiesta rifiutata. Invia una nuova richiesta al canale."
                 )
-            await callback.answer("Неверный ответ.")
+            await callback.answer("Risposta errata.")
             return
 
         question, answer, options = generate_captcha()
         self.storage.refresh_captcha(request_id, question, answer)
         remaining = self.settings.max_captcha_attempts - attempts
         new_text = (
-            "Неверный ответ.\n"
-            f"Осталось попыток: {remaining}\n"
-            f"Новая капча:\n{question}"
+            "Risposta errata.\n"
+            f"Tentativi rimasti: {remaining}\n"
+            f"Nuovo captcha:\n{question}"
         )
         if callback.message:
             await callback.message.edit_text(new_text, reply_markup=build_captcha_keyboard(request_id, options))
-        await callback.answer("Неверно, попробуйте снова.")
+        await callback.answer("Errato, riprova.")
 
     async def on_admin_callback(self, callback: CallbackQuery) -> None:
         if not callback.data:
-            await callback.answer("Некорректное действие.", show_alert=True)
+            await callback.answer("Azione non valida.", show_alert=True)
             return
 
         if callback.from_user.id not in self.settings.admin_ids:
-            await callback.answer("У вас нет прав для этого действия.", show_alert=True)
+            await callback.answer("Non hai i permessi per questa azione.", show_alert=True)
             return
 
         parsed = parse_admin_callback(callback.data)
         if parsed is None:
-            await callback.answer("Некорректное действие.", show_alert=True)
+            await callback.answer("Azione non valida.", show_alert=True)
             return
 
         action, request_id = parsed
         request = self.storage.get(request_id)
         if request is None:
-            await callback.answer("Заявка не найдена.", show_alert=True)
+            await callback.answer("Richiesta non trovata.", show_alert=True)
             return
 
         if request["status"] != "pending_admin":
-            await callback.answer("Заявка уже обработана.", show_alert=True)
+            await callback.answer("La richiesta e gia stata elaborata.", show_alert=True)
             return
 
         user_chat_id = int(request["user_chat_id"])
         if action == "approve":
             approved = await self.try_approve_request(request)
             if not approved:
-                await callback.answer("Не удалось одобрить заявку.", show_alert=True)
+                await callback.answer("Impossibile approvare la richiesta.", show_alert=True)
                 return
             self.storage.complete(request_id, "approved", callback.from_user.id, "manual_approve")
             await self.safe_send_user_message(
                 user_chat_id,
-                "Администратор одобрил вашу заявку. Добро пожаловать в канал.",
+                "Un amministratore ha approvato la tua richiesta. Benvenuto nel canale.",
             )
-            final_text = self._build_admin_result_text(request, "одобрена", callback.from_user.id)
+            final_text = self._build_admin_result_text(request, "approvata", callback.from_user.id)
             if callback.message:
                 await callback.message.edit_text(final_text)
-            await callback.answer("Заявка одобрена.")
+            await callback.answer("Richiesta approvata.")
             return
 
         declined = await self.try_decline_request(request)
         if not declined:
-            await callback.answer("Не удалось отклонить заявку.", show_alert=True)
+            await callback.answer("Impossibile rifiutare la richiesta.", show_alert=True)
             return
         self.storage.complete(request_id, "declined", callback.from_user.id, "manual_decline")
         await self.safe_send_user_message(
             user_chat_id,
-            "Администратор отклонил вашу заявку в канал.",
+            "Un amministratore ha rifiutato la tua richiesta al canale.",
         )
-        final_text = self._build_admin_result_text(request, "отклонена", callback.from_user.id)
+        final_text = self._build_admin_result_text(request, "rifiutata", callback.from_user.id)
         if callback.message:
             await callback.message.edit_text(final_text)
-        await callback.answer("Заявка отклонена.")
+        await callback.answer("Richiesta rifiutata.")
 
     async def notify_admins(
         self,
@@ -516,15 +519,15 @@ class JoinGuardBot:
         estimated_age_days: int,
     ) -> None:
         user = join_request.from_user
-        username = f"@{user.username}" if user.username else "нет"
+        username = f"@{user.username}" if user.username else "non impostato"
         text = (
-            "Подозрительная заявка в канал\n"
-            f"Канал: {join_request.chat.title} ({join_request.chat.id})\n"
-            f"Пользователь: {user.full_name}\n"
+            "Richiesta sospetta per il canale\n"
+            f"Canale: {join_request.chat.title} ({join_request.chat.id})\n"
+            f"Utente: {user.full_name}\n"
             f"ID: {user.id}\n"
             f"Username: {username}\n"
-            f"Оценочный возраст аккаунта: {estimated_age_days} дн.\n"
-            f"Причина: {reason}\n"
+            f"Eta account stimata: {estimated_age_days} giorni.\n"
+            f"Motivo: {reason}\n"
             f"request_id: {request_id}"
         )
 
@@ -573,14 +576,14 @@ class JoinGuardBot:
             return False
 
     def _build_admin_result_text(self, request: sqlite3.Row, status_text: str, admin_id: int) -> str:
-        username = f"@{request['username']}" if request["username"] else "нет"
+        username = f"@{request['username']}" if request["username"] else "non impostato"
         return (
-            "Заявка обработана\n"
-            f"Пользователь: {request['first_name']} {request['last_name'] or ''}\n"
+            "Richiesta elaborata\n"
+            f"Utente: {request['first_name']} {request['last_name'] or ''}\n"
             f"ID: {request['user_id']}\n"
             f"Username: {username}\n"
-            f"Статус: {status_text}\n"
-            f"Администратор: {admin_id}"
+            f"Stato: {status_text}\n"
+            f"Amministratore: {admin_id}"
         )
 
     async def run(self) -> None:
