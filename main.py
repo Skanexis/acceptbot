@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -9,13 +10,30 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart, Command
-from aiogram.types import CallbackQuery, ChatJoinRequest, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    ChatJoinRequest,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
 from dotenv import load_dotenv
+
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+except ImportError:
+    Image = None
+    ImageDraw = None
+    ImageFilter = None
+    ImageFont = None
 
 
 ID_DATE_ANCHORS: list[tuple[int, datetime]] = [
@@ -241,7 +259,7 @@ class Storage:
         self,
         request_id: int,
         question: str,
-        answer: int,
+        answer: str,
         max_attempts: int,
         difficulty: str,
     ) -> None:
@@ -262,7 +280,7 @@ class Storage:
         )
         self.conn.commit()
 
-    def refresh_captcha(self, request_id: int, question: str, answer: int) -> None:
+    def refresh_captcha(self, request_id: int, question: str, answer: str) -> None:
         self.conn.execute(
             """
             UPDATE join_requests
@@ -273,6 +291,19 @@ class Storage:
             (question, answer, request_id),
         )
         self.conn.commit()
+
+    def get_pending_captcha_by_user(self, user_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM join_requests
+            WHERE user_id = ?
+              AND status = 'pending_captcha'
+            ORDER BY submitted_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
 
     def increment_captcha_attempts(self, request_id: int) -> int:
         self.conn.execute(
@@ -439,48 +470,100 @@ def build_risk_summary(score: int, reasons: list[str]) -> str:
     return f"risk_score={score}; reasons={joined}"
 
 
-def generate_captcha(difficulty: str = "normal") -> tuple[str, int, list[int]]:
-    if difficulty == "hard":
-        first = random.randint(7, 19)
-        second = random.randint(3, 13)
-        operation = random.choice(["+", "-", "*"])
-    else:
-        first = random.randint(2, 12)
-        second = random.randint(1, 9)
-        operation = random.choice(["+", "-"])
-
-    if operation == "-" and second > first:
-        first, second = second, first
-
-    if operation == "+":
-        answer = first + second
-    elif operation == "-":
-        answer = first - second
-    else:
-        answer = first * second
-
-    options = {answer}
-    noise_limit = 20 if difficulty == "hard" else 7
-
-    while len(options) < 4:
-        options.add(answer + random.randint(-noise_limit, noise_limit))
-
-    options_list = list(options)
-    random.shuffle(options_list)
-    question = f"{first} {operation} {second} = ?"
-    return question, answer, options_list
+CAPTCHA_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+CAPTCHA_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+)
 
 
-def build_captcha_keyboard(request_id: int, options: list[int]) -> InlineKeyboardMarkup:
-    first_row = [
-        InlineKeyboardButton(text=str(options[0]), callback_data=f"cap:{request_id}:{options[0]}"),
-        InlineKeyboardButton(text=str(options[1]), callback_data=f"cap:{request_id}:{options[1]}"),
-    ]
-    second_row = [
-        InlineKeyboardButton(text=str(options[2]), callback_data=f"cap:{request_id}:{options[2]}"),
-        InlineKeyboardButton(text=str(options[3]), callback_data=f"cap:{request_id}:{options[3]}"),
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=[first_row, second_row])
+@dataclass(frozen=True)
+class CaptchaChallenge:
+    prompt: str
+    answer: str
+    image_bytes: bytes
+
+
+def normalize_captcha_answer(raw: str) -> str:
+    return "".join(raw.upper().split())
+
+
+@lru_cache(maxsize=8)
+def load_captcha_font(size: int):
+    if ImageFont is None:
+        raise RuntimeError("Pillow is required for image captcha. Install dependencies from requirements.txt.")
+
+    for candidate in CAPTCHA_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def build_captcha_image(answer: str, difficulty: str) -> bytes:
+    if Image is None or ImageDraw is None or ImageFilter is None:
+        raise RuntimeError("Pillow is required for image captcha. Install dependencies from requirements.txt.")
+
+    width = 330 if difficulty == "hard" else 290
+    height = 120
+    image = Image.new("RGB", (width, height), (244, 248, 252))
+    draw = ImageDraw.Draw(image)
+
+    line_count = 30 if difficulty == "hard" else 20
+    for _ in range(line_count):
+        start = (random.randint(0, width), random.randint(0, height))
+        end = (random.randint(0, width), random.randint(0, height))
+        color = (
+            random.randint(90, 170),
+            random.randint(90, 170),
+            random.randint(90, 170),
+        )
+        draw.line([start, end], fill=color, width=random.randint(1, 2))
+
+    dot_count = 1700 if difficulty == "hard" else 1100
+    for _ in range(dot_count):
+        draw.point(
+            (random.randint(0, width - 1), random.randint(0, height - 1)),
+            fill=(random.randint(120, 220), random.randint(120, 220), random.randint(120, 220)),
+        )
+
+    font_size = 54 if difficulty == "hard" else 50
+    font = load_captcha_font(font_size)
+    slot_width = width // (len(answer) + 1)
+    y_base = 24
+    resample_mode = Image.Resampling.BICUBIC if hasattr(Image, "Resampling") else Image.BICUBIC
+
+    for index, symbol in enumerate(answer):
+        glyph = Image.new("RGBA", (80, 100), (0, 0, 0, 0))
+        glyph_draw = ImageDraw.Draw(glyph)
+        glyph_color = (
+            random.randint(10, 80),
+            random.randint(10, 80),
+            random.randint(10, 80),
+            255,
+        )
+        glyph_draw.text((12, 12), symbol, font=font, fill=glyph_color)
+        rotated = glyph.rotate(random.randint(-35, 35), resample=resample_mode, expand=True)
+        x = slot_width * (index + 1) - 20 + random.randint(-8, 8)
+        y = y_base + random.randint(-10, 10)
+        image.paste(rotated, (x, y), rotated)
+
+    image = image.filter(ImageFilter.GaussianBlur(radius=0.8 if difficulty == "hard" else 0.45))
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def generate_captcha(difficulty: str = "normal") -> CaptchaChallenge:
+    length = 6 if difficulty == "hard" else 5
+    answer = "".join(random.choice(CAPTCHA_ALPHABET) for _ in range(length))
+    prompt = "Scrivi i simboli che vedi nell'immagine. Usa solo lettere maiuscole e numeri."
+    image_bytes = build_captcha_image(answer=answer, difficulty=difficulty)
+    return CaptchaChallenge(prompt=prompt, answer=normalize_captcha_answer(answer), image_bytes=image_bytes)
 
 
 def build_admin_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -537,21 +620,6 @@ def build_pending_actions_keyboard(requests: list[sqlite3.Row], mode: str) -> In
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def parse_captcha_callback(data: str) -> tuple[int, int] | None:
-    parts = data.split(":")
-    if len(parts) != 3:
-        return None
-    if parts[0] != "cap":
-        return None
-
-    try:
-        request_id = int(parts[1])
-        answer = int(parts[2])
-    except ValueError:
-        return None
-    return request_id, answer
-
-
 def parse_admin_callback(data: str) -> tuple[str, int] | None:
     parts = data.split(":")
     if len(parts) != 3:
@@ -596,8 +664,9 @@ class JoinGuardBot:
         self.dp.message.register(self.on_stats_command, Command("stats"))
         self.dp.message.register(self.on_pending_command, Command("pending"))
         self.dp.message.register(self.on_channel_command, Command("channel"))
+        self.dp.message.register(self.on_captcha_text, F.text)
         self.dp.chat_join_request.register(self.on_join_request)
-        self.dp.callback_query.register(self.on_captcha_callback, F.data.startswith("cap:"))
+        self.dp.callback_query.register(self.on_legacy_captcha_callback, F.data.startswith("cap:"))
         self.dp.callback_query.register(self.on_admin_callback, F.data.startswith("adm:"))
         self.dp.callback_query.register(self.on_panel_callback, F.data.startswith("panel:"))
 
@@ -782,78 +851,66 @@ class JoinGuardBot:
 
         if risk.score >= self.settings.risk_score_to_hard_captcha:
             max_attempts = min(self.settings.max_captcha_attempts, self.settings.hard_captcha_attempts)
-            question, answer, options = generate_captcha(difficulty="hard")
+            challenge = generate_captcha(difficulty="hard")
             self.storage.mark_pending_captcha(
                 request_id=request_id,
-                question=question,
-                answer=answer,
+                question=challenge.prompt,
+                answer=challenge.answer,
                 max_attempts=max_attempts,
                 difficulty="hard",
             )
-            await self.safe_send_user_message(
+            await self.safe_send_user_captcha(
                 join_request.user_chat_id,
+                challenge.image_bytes,
                 (
                     "Controllo avanzato attivato.\n"
                     f"Tentativi disponibili: {max_attempts}\n"
-                    f"Risolvi il captcha:\n{question}"
+                    f"{challenge.prompt}"
                 ),
-                reply_markup=build_captcha_keyboard(request_id, options),
             )
             return
 
-        question, answer, options = generate_captcha(difficulty="normal")
+        challenge = generate_captcha(difficulty="normal")
         self.storage.mark_pending_captcha(
             request_id=request_id,
-            question=question,
-            answer=answer,
+            question=challenge.prompt,
+            answer=challenge.answer,
             max_attempts=self.settings.max_captcha_attempts,
             difficulty="normal",
         )
-        await self.safe_send_user_message(
+        await self.safe_send_user_captcha(
             join_request.user_chat_id,
+            challenge.image_bytes,
             (
                 "Controllo account completato.\n"
-                f"Risolvi il captcha per entrare nel canale:\n{question}"
+                f"Tentativi disponibili: {self.settings.max_captcha_attempts}\n"
+                f"{challenge.prompt}"
             ),
-            reply_markup=build_captcha_keyboard(request_id, options),
         )
 
-    async def on_captcha_callback(self, callback: CallbackQuery) -> None:
-        if not callback.data:
-            await callback.answer("Captcha non valido.", show_alert=True)
+    async def on_captcha_text(self, message: Message) -> None:
+        if not message.from_user or not message.text:
+            return
+        if message.text.startswith("/"):
             return
 
-        parsed = parse_captcha_callback(callback.data)
-        if parsed is None:
-            await callback.answer("Captcha non valido.", show_alert=True)
-            return
-
-        request_id, selected_answer = parsed
-        request = self.storage.get(request_id)
+        request = self.storage.get_pending_captcha_by_user(message.from_user.id)
         if request is None:
-            await callback.answer("Richiesta non trovata.", show_alert=True)
             return
 
-        if int(request["user_id"]) != callback.from_user.id:
-            await callback.answer("Questo captcha non e tuo.", show_alert=True)
-            return
-
-        if request["status"] != "pending_captcha":
-            await callback.answer("La richiesta e gia stata elaborata.", show_alert=True)
-            return
-
+        request_id = int(request["id"])
         max_attempts = int(request["captcha_max_attempts"] or self.settings.max_captcha_attempts)
         captcha_difficulty = str(request["captcha_difficulty"] or "normal")
-        expected_answer = int(request["captcha_answer"])
-        if selected_answer == expected_answer:
+        expected_answer = normalize_captcha_answer(str(request["captcha_answer"] or ""))
+        user_answer = normalize_captcha_answer(message.text)
+
+        if user_answer == expected_answer:
             approved = await self.try_approve_request(request)
             if approved:
                 self.storage.complete(request_id, "approved", None, f"captcha_passed:{captcha_difficulty}")
-                if callback.message:
-                    await callback.message.edit_text("Captcha superato. Richiesta approvata, accesso al canale aperto.")
-                await callback.answer("Richiesta approvata.")
+                await message.answer("Captcha superato. Richiesta approvata, accesso al canale aperto.")
             else:
-                await callback.answer("Impossibile approvare la richiesta, riprova piu tardi.", show_alert=True)
+                await message.answer("Impossibile approvare la richiesta, riprova piu tardi.")
             return
 
         attempts = self.storage.increment_captcha_attempts(request_id)
@@ -861,24 +918,29 @@ class JoinGuardBot:
             declined = await self.try_decline_request(request)
             if declined:
                 self.storage.complete(request_id, "declined", None, f"captcha_failed:{captcha_difficulty}")
-            if callback.message:
-                await callback.message.edit_text(
-                    "Limite tentativi raggiunto. Richiesta rifiutata. Invia una nuova richiesta al canale."
-                )
-            await callback.answer("Risposta errata.")
+            await message.answer(
+                "Limite tentativi raggiunto. Richiesta rifiutata. Invia una nuova richiesta al canale."
+            )
             return
 
-        question, answer, options = generate_captcha(difficulty=captcha_difficulty)
-        self.storage.refresh_captcha(request_id, question, answer)
+        challenge = generate_captcha(difficulty=captcha_difficulty)
+        self.storage.refresh_captcha(request_id, challenge.prompt, challenge.answer)
         remaining = max_attempts - attempts
-        new_text = (
-            "Risposta errata.\n"
-            f"Tentativi rimasti: {remaining}\n"
-            f"Nuovo captcha:\n{question}"
+        await self.safe_send_user_captcha(
+            int(request["user_chat_id"]),
+            challenge.image_bytes,
+            (
+                "Risposta errata.\n"
+                f"Tentativi rimasti: {remaining}\n"
+                f"{challenge.prompt}"
+            ),
         )
-        if callback.message:
-            await callback.message.edit_text(new_text, reply_markup=build_captcha_keyboard(request_id, options))
-        await callback.answer("Errato, riprova.")
+
+    async def on_legacy_captcha_callback(self, callback: CallbackQuery) -> None:
+        await callback.answer(
+            "Captcha aggiornata: apri l'ultima immagine e invia i simboli come messaggio.",
+            show_alert=True,
+        )
 
     async def on_admin_callback(self, callback: CallbackQuery) -> None:
         if not callback.data:
@@ -993,6 +1055,15 @@ class JoinGuardBot:
             logging.warning("Cannot message user_chat_id=%s (forbidden)", user_chat_id)
         except TelegramBadRequest as exc:
             logging.warning("Cannot message user_chat_id=%s: %s", user_chat_id, str(exc))
+
+    async def safe_send_user_captcha(self, user_chat_id: int, image_bytes: bytes, caption: str) -> None:
+        try:
+            payload = BufferedInputFile(image_bytes, filename="captcha.png")
+            await self.bot.send_photo(user_chat_id, payload, caption=caption)
+        except TelegramForbiddenError:
+            logging.warning("Cannot send captcha to user_chat_id=%s (forbidden)", user_chat_id)
+        except TelegramBadRequest as exc:
+            logging.warning("Cannot send captcha to user_chat_id=%s: %s", user_chat_id, str(exc))
 
     async def try_approve_request(self, request: sqlite3.Row) -> bool:
         try:
@@ -1125,6 +1196,8 @@ class JoinGuardBot:
 async def main() -> None:
     load_dotenv()
     settings = Settings.from_env()
+    if Image is None:
+        raise RuntimeError("Pillow is not installed. Run: pip install -r requirements.txt")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",

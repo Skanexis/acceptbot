@@ -14,19 +14,19 @@
 Если проект еще не в удаленном репозитории:
 
 ```bash
-cd PATH_TO_PROJECT
+cd <PATH_TO_PROJECT>
 git init
 git add .
 git commit -m "Initial commit"
 git branch -M main
-git remote add origin REPO_URL
+git remote add origin <REPO_URL>
 git push -u origin main
 ```
 
 Если репозиторий уже есть, достаточно:
 
 ```bash
-cd PATH_TO_PROJECT
+cd <PATH_TO_PROJECT>
 git add .
 git commit -m "Deploy update"
 git push
@@ -44,7 +44,7 @@ sudo apt install -y python3 python3-venv python3-pip git
 Создайте отдельного системного пользователя и директории:
 
 ```bash
-sudo useradd --system --shell /usr/sbin/nologin --home-dir /home/joinguard --create-home joinguard || true
+sudo useradd --system --shell /usr/sbin/nologin --home-dir /opt/join-guard-bot --create-home joinguard || true
 sudo mkdir -p /opt/join-guard-bot /var/lib/join-guard
 sudo chown -R joinguard:joinguard /opt/join-guard-bot /var/lib/join-guard
 ```
@@ -54,7 +54,7 @@ sudo chown -R joinguard:joinguard /opt/join-guard-bot /var/lib/join-guard
 На VPS (под пользователем `joinguard`) клонируйте репозиторий:
 
 ```bash
-sudo -u joinguard git clone REPO_URL /opt/join-guard-bot
+sudo -u joinguard git clone <https://github.com/Skanexis/acceptbot.git> /opt/join-guard-bot
 ```
 
 Если проект уже есть на VPS:
@@ -65,15 +65,6 @@ sudo -u joinguard git fetch --all
 sudo -u joinguard git checkout main
 sudo -u joinguard git pull --ff-only
 sudo chown -R joinguard:joinguard /opt/join-guard-bot
-```
-
-Если `git clone` пишет `already exists and is not an empty directory`, сделайте:
-
-```bash
-sudo mv /opt/join-guard-bot /opt/join-guard-bot.bak.$(date +%F-%H%M%S)
-sudo mkdir -p /opt/join-guard-bot
-sudo chown joinguard:joinguard /opt/join-guard-bot
-sudo -u joinguard git clone REPO_URL /opt/join-guard-bot
 ```
 
 ## 5. Установка зависимостей
@@ -102,9 +93,6 @@ ADMIN_IDS=111111111,222222222
 DB_PATH=/var/lib/join-guard/join_guard.db
 MIN_ACCOUNT_AGE_DAYS=30
 MAX_CAPTCHA_ATTEMPTS=3
-RISK_SCORE_TO_HARD_CAPTCHA=4
-RISK_SCORE_TO_ADMIN=7
-HARD_CAPTCHA_ATTEMPTS=1
 ```
 
 ## 7. Запуск как systemd-сервис
@@ -130,7 +118,7 @@ sudo journalctl -u join-guard -f
 ### 8.1 Локально (выгрузка изменений в Git)
 
 ```bash
-cd PATH_TO_PROJECT
+cd <PATH_TO_PROJECT>
 git add .
 git commit -m "Update bot"
 git push
@@ -156,28 +144,6 @@ sudo systemctl stop join-guard
 sudo systemctl start join-guard
 sudo journalctl -u join-guard -n 100 --no-pager
 ```
-
-Если в логах есть ошибка `can't use getUpdates method while webhook is active`, выполните:
-
-```bash
-set -a; source /opt/join-guard-bot/.env; set +a
-curl -s "https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=false"
-sudo systemctl restart join-guard
-```
-
-## 10. Администрирование канала через бота
-
-Команды доступны только ID из `ADMIN_IDS`:
-
-- `/admin` - панель управления (dashboard, pending, channel, переключение режима)
-- `/stats` - метрики за последние 24 часа
-- `/pending` - очередь ручной модерации с кнопками `Approva/Rifiuta`
-- `/channel` - статус канала и права бота
-
-Режимы модерации:
-
-- `hybrid` - риск-движок + капча + ручная проверка для высокого риска
-- `manual` - все заявки идут на ручную проверку администраторам
 
 ## Что важно для вашего случая с двумя активными сервисами
 
