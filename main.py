@@ -584,6 +584,8 @@ class JoinGuardBot:
         )
 
     async def run(self) -> None:
+        # The bot is designed to work in long polling mode, so we disable webhook on startup.
+        await self.bot.delete_webhook(drop_pending_updates=False)
         await self.dp.start_polling(self.bot, allowed_updates=self.dp.resolve_used_update_types())
 
     async def close(self) -> None:
