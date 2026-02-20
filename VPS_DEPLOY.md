@@ -14,19 +14,19 @@
 Если проект еще не в удаленном репозитории:
 
 ```bash
-cd <PATH_TO_PROJECT>
+cd PATH_TO_PROJECT
 git init
 git add .
 git commit -m "Initial commit"
 git branch -M main
-git remote add origin <REPO_URL>
+git remote add origin REPO_URL
 git push -u origin main
 ```
 
 Если репозиторий уже есть, достаточно:
 
 ```bash
-cd <PATH_TO_PROJECT>
+cd PATH_TO_PROJECT
 git add .
 git commit -m "Deploy update"
 git push
@@ -102,6 +102,9 @@ ADMIN_IDS=111111111,222222222
 DB_PATH=/var/lib/join-guard/join_guard.db
 MIN_ACCOUNT_AGE_DAYS=30
 MAX_CAPTCHA_ATTEMPTS=3
+RISK_SCORE_TO_HARD_CAPTCHA=4
+RISK_SCORE_TO_ADMIN=7
+HARD_CAPTCHA_ATTEMPTS=1
 ```
 
 ## 7. Запуск как systemd-сервис
@@ -127,7 +130,7 @@ sudo journalctl -u join-guard -f
 ### 8.1 Локально (выгрузка изменений в Git)
 
 ```bash
-cd <PATH_TO_PROJECT>
+cd PATH_TO_PROJECT
 git add .
 git commit -m "Update bot"
 git push
@@ -161,6 +164,20 @@ set -a; source /opt/join-guard-bot/.env; set +a
 curl -s "https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook?drop_pending_updates=false"
 sudo systemctl restart join-guard
 ```
+
+## 10. Администрирование канала через бота
+
+Команды доступны только ID из `ADMIN_IDS`:
+
+- `/admin` - панель управления (dashboard, pending, channel, переключение режима)
+- `/stats` - метрики за последние 24 часа
+- `/pending` - очередь ручной модерации с кнопками `Approva/Rifiuta`
+- `/channel` - статус канала и права бота
+
+Режимы модерации:
+
+- `hybrid` - риск-движок + капча + ручная проверка для высокого риска
+- `manual` - все заявки идут на ручную проверку администраторам
 
 ## Что важно для вашего случая с двумя активными сервисами
 
